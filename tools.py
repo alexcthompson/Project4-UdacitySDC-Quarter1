@@ -331,7 +331,7 @@ def compute_lane_lines(lanepx, left_start, right_start, height=720, render=False
         draw_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
         draw_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
 
-        cv2.polylines(draw_img, [left_line, right_line], 0, color=(255, 255, 0), thickness=3)
+        cv2.polylines(draw_img, [left_line, right_line], 0, color=(255, 255, 0), thickness=2)
 
     return draw_img, left_fit, right_fit, left_line, right_line, left_fitx, right_fitx, ploty
 
@@ -393,6 +393,55 @@ def draw_lane_lines(image, left_fit, right_fit, ploty):
     return cv2.addWeighted(rewarped, 1, image, 1.0, 0)
 
 
+def process_frame(image, L, R, i):
+    lanepx = undistort_find_px_transform(image)
+
+    # detect histogram peaks and update base starting points
+    new_left_base, new_right_base = detect_lane_histogram(lanepx)
+    L.update_base(new_left_base)
+    R.update_base(new_right_base)
+
+    # fit lane lines and update polynomial coefficients
+    draw_img, left_fit, right_fit, left_line, right_line, left_fitx, right_fitx, ploty = \
+        compute_lane_lines(lanepx, L.best_xbase, R.best_xbase, render=False)
+    L.update_polys(left_fit)
+    R.update_polys(right_fit)
+
+    # get curvature and lane line distances from center and update
+    curvature_left, curvature_right, left_dist, right_dist = \
+        summarize_lane_position(left_fitx, right_fitx, ploty, print_res=False)
+
+    L.update_curvature(curvature_left)
+    L.update_line_base_pos(left_dist)
+    R.update_curvature(curvature_right)
+    R.update_line_base_pos(right_dist)
+
+    # render lane lines
+    annotated_image = draw_lane_lines(image, L.best_fit, R.best_fit, ploty)
+
+    # update annotations if it has been 5 frames
+    if i % 10 == 0:
+        curvature = np.mean([L.curvature, R.curvature]).astype(np.int32)
+        if curvature <= 0:
+            annotation = 'Radius of curvature: {:d} meters, Left'.format(np.abs(curvature))
+        else:
+            annotation = 'Radius of curvature: {:d} meters, Right'.format(np.abs(curvature))
+
+        center_offset = (np.mean([L.line_base_pos, R.line_base_pos]) - 640) * x_m_per_pix
+        if center_offset >= 0:
+            annotation2 = '{:.2f} meters L of centerline'.format(np.abs(center_offset))
+        else:
+            annotation2 = '{:.2f} meters R of centerline'.format(np.abs(center_offset))
+
+        L.update_annotations((annotation, annotation2))
+
+    # render text
+    cv2.putText(annotated_image, L.annotations[0], (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0))
+    cv2.putText(annotated_image, L.annotations[1], (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0))
+
+    return annotated_image
+
+
 # CURVATURE
 
 def curvature(A, B, y):
@@ -435,7 +484,8 @@ def side_by_sides(images, transformation, vert=False, twidth=None, theight=None)
         side_by_side(image, transformation, vert=vert, twidth=twidth, theight=theight)
 
 
-# Define a class to receive the characteristics of each line detection
+# CLASS FOR ORGANIZING LANE LINE DATA, TRANSFORMATIONS, AND UPDATES
+
 class Line():
     def __init__(self, n=10):
         # number of frames to look back
