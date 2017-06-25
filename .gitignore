@@ -8,3 +8,4 @@ archive/*
 __pycache__
 *.json
 *.DS_Store
+examples/project*

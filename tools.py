@@ -231,38 +231,41 @@ def undistort_find_px_transform(image):
     lane_pixels = find_lane_pixels(image)
     undist = undistort(lane_pixels * 255)
     unwarped = cv2.warpPerspective(undist, pM, (image.shape[1], image.shape[0]))
+    binary = (unwarped > 150)
 
-    return unwarped
+    return binary
 
 
-def compute_lane_lines(lanepx):
-    # TODO - break this beast up!
-    binary_warped = (lanepx > 150)
-    height, width = binary_warped.shape
+def detect_lane_histogram(lanepx, height=720):
+    histogram = np.sum(lanepx[height // 2:, :], axis=0)
 
-    histogram = np.sum(binary_warped[height // 2:, :], axis=0)
     fwd_pass_smoothing = butter_lowpass_filter(histogram, 3, 100, order=2)
     smoothed_histogram = butter_lowpass_filter(fwd_pass_smoothing[::-1], 2, 100, order=2)[::-1]
-
-    out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
-    out_img.astype('uint8')
 
     midpoint = np.int(smoothed_histogram.shape[0] / 2)
     leftx_base = np.argmax(smoothed_histogram[:midpoint])
     rightx_base = np.argmax(smoothed_histogram[midpoint:]) + midpoint
+
+    return leftx_base, rightx_base
+
+
+def compute_lane_lines(lanepx, left_start, right_start, height=720, render=False):
+    # TODO - break this beast up!
+    out_img = np.dstack((lanepx, lanepx, lanepx)) * 255
+    out_img.astype('uint8')
 
     # Choose the number of sliding windows
     nwindows = 9
     # Set height of windows
     window_height = np.int(height / nwindows)
     # Identify the x and y positions of all nonzero pixels in the image
-    nonzero = binary_warped.nonzero()
+    nonzero = lanepx.nonzero()
     nonzeroy = np.array(nonzero[0])
     nonzerox = np.array(nonzero[1])
 
     # Current positions to be updated for each window
-    leftx_current = leftx_base
-    rightx_current = rightx_base
+    leftx_current = left_start
+    rightx_current = right_start
     # Set the width of the windows +/- margin
     margin = 60
     # Set minimum number of pixels found to recenter window
@@ -276,17 +279,18 @@ def compute_lane_lines(lanepx):
     # Step through the windows one by one
     for window in range(nwindows):
         # Identify window boundaries in x and y (and right and left)
-        win_y_low = binary_warped.shape[0] - (window + 1) * window_height
-        win_y_high = binary_warped.shape[0] - window * window_height
+        win_y_low = lanepx.shape[0] - (window + 1) * window_height
+        win_y_high = lanepx.shape[0] - window * window_height
         win_xleft_low = leftx_current - margin
         win_xleft_high = leftx_current + margin
         win_xright_low = rightx_current - margin
         win_xright_high = rightx_current + margin
         # Draw the windows on the visualization image
-        cv2.rectangle(draw_img, (win_xleft_low, win_y_low),
-                      (win_xleft_high, win_y_high), (0, 255, 0), 2)
-        cv2.rectangle(draw_img, (win_xright_low, win_y_low),
-                      (win_xright_high, win_y_high), (0, 255, 0), 2)
+        if render:
+            cv2.rectangle(draw_img, (win_xleft_low, win_y_low),
+                          (win_xleft_high, win_y_high), (0, 255, 0), 2)
+            cv2.rectangle(draw_img, (win_xright_low, win_y_low),
+                          (win_xright_high, win_y_high), (0, 255, 0), 2)
         # Identify the nonzero pixels in x and y within the window
         good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & (
             nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
@@ -316,19 +320,77 @@ def compute_lane_lines(lanepx):
     right_fit = np.polyfit(righty, rightx, 2)
 
     # Generate x and y values for plotting
-    ploty = np.linspace(0, binary_warped.shape[0] - 1, 50)
+    ploty = np.linspace(0, lanepx.shape[0] - 1, 50)
     left_fitx = left_fit[0] * ploty**2 + left_fit[1] * ploty + left_fit[2]
     left_line = np.dstack((left_fitx, ploty)).astype('int32')
 
     right_fitx = right_fit[0] * ploty**2 + right_fit[1] * ploty + right_fit[2]
     right_line = np.dstack((right_fitx, ploty)).astype('int32')
 
-    draw_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
-    draw_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
+    if render:
+        draw_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
+        draw_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
 
-    cv2.polylines(draw_img, [left_line, right_line], 0, color=(255, 255, 0), thickness=3)
+        cv2.polylines(draw_img, [left_line, right_line], 0, color=(255, 255, 0), thickness=3)
 
     return draw_img, left_fit, right_fit, left_line, right_line, left_fitx, right_fitx, ploty
+
+
+y_m_per_pix = (3 * 14.64) / 720
+x_m_per_pix = y_m_per_pix / 5
+
+
+def summarize_lane_position(left_fitx, right_fitx, ploty, print_res=True):
+    y_eval = np.max(ploty)
+
+    left_fit_irl = np.polyfit(ploty * y_m_per_pix, left_fitx * x_m_per_pix, 2)
+    right_fit_irl = np.polyfit(ploty * y_m_per_pix, right_fitx * x_m_per_pix, 2)
+
+    irl_curvature_left = curvature_via_fit(left_fit_irl, y_eval)
+    irl_curvature_right = curvature_via_fit(right_fit_irl, y_eval)
+
+    left_dist = left_fitx[-1]
+    right_dist = right_fitx[-1]
+
+    right_deviation = ((1280 - left_dist - right_dist) / 2) * x_m_per_pix
+
+    if print_res:
+        print('==============================')
+        print('720px-Curvature:', irl_curvature_left, 'm', irl_curvature_right, 'm')
+
+        if right_deviation >= 0:
+            print('Vehicle is right {:.2f} meters from center lane'.format(right_deviation))
+        else:
+            print('Vehicle is left  {:.2f} meters from center lane'.format(-right_deviation))
+
+    return irl_curvature_left, irl_curvature_right, left_dist, right_dist
+
+
+def draw_lane_lines(image, left_fit, right_fit, ploty):
+    start = np.zeros_like(image)
+
+    left_fitx = left_fit[0] * ploty**2 + left_fit[1] * ploty + left_fit[2]
+    left_line = np.dstack((left_fitx, ploty)).astype('int32')
+
+    right_fitx = right_fit[0] * ploty**2 + right_fit[1] * ploty + right_fit[2]
+    right_line = np.dstack((right_fitx, ploty)).astype('int32')
+
+    # draw lane lines
+    half_thickness = 8
+    cv2.polylines(start, [left_line, right_line], False,
+                  (255, 0, 255), thickness=2 * half_thickness)
+
+    # fill space between
+    left_edge = np.copy(left_line)
+    left_edge[:, :, 0] += half_thickness
+    right_edge = np.copy(right_line)
+    right_edge[:, :, 0] -= half_thickness
+    cv2.fillConvexPoly(start, np.hstack((left_edge, right_edge[:, ::-1])), color=(0, 199, 255))
+
+    # map back to camera perspective
+    rewarped = cv2.warpPerspective(start, pinvM, (start.shape[1], start.shape[0]))
+
+    return cv2.addWeighted(rewarped, 1, image, 1.0, 0)
 
 
 # CURVATURE
@@ -371,3 +433,60 @@ def side_by_side(image, transformation, vert=False, twidth=None, theight=None):
 def side_by_sides(images, transformation, vert=False, twidth=None, theight=None):
     for image in images:
         side_by_side(image, transformation, vert=vert, twidth=twidth, theight=theight)
+
+
+# Define a class to receive the characteristics of each line detection
+class Line():
+    def __init__(self, n=10):
+        # number of frames to look back
+        self.n = n
+        # was the line detected in the last iteration?
+        self.detected = False
+        # x values of the last n fits of the line
+        self.recent_xbase = []
+        # best x base starting point for line fit
+        self.best_xbase = None
+        # average x values of the fitted line over the last n iterations
+        self.poly_coeff = None
+        # polynomial coefficients averaged over the last n iterations
+        self.best_fit = None
+        # radius of curvature of the line in some units
+        self.curvature = None
+        # distance in meters of vehicle center from the line
+        self.line_base_pos = None
+        # persist annotations with this variable
+        self.annotations = None
+
+    def update_base(self, new_base):
+        self.recent_xbase.append(new_base)
+
+        if len(self.recent_xbase) > self.n:
+            self.recent_xbase.pop(0)
+
+        self.best_xbase = np.round(np.mean(self.recent_xbase)).astype(np.int32)
+
+    def update_polys(self, new_coeff):
+        if self.poly_coeff is not None:
+            self.poly_coeff = np.vstack((self.poly_coeff, new_coeff))
+        else:
+            self.poly_coeff = new_coeff.reshape(-1, 3)
+
+        if self.poly_coeff.shape[0] > self.n:
+            self.poly_coeff = self.poly_coeff[1:]
+
+        self.best_fit = np.mean(self.poly_coeff, axis = 0)
+
+    def update_curvature(self, new_curvature):
+        if self.curvature is not None:
+            self.curvature = 0.1 * new_curvature + 0.9 * self.curvature
+        else:
+            self.curvature = new_curvature
+
+    def update_line_base_pos(self, new_line_base_pos):
+        if self.line_base_pos is not None:
+            self.line_base_pos = 0.1 * new_line_base_pos + 0.9 * self.line_base_pos
+        else:
+            self.line_base_pos = new_line_base_pos
+
+    def update_annotations(self, annotations):
+        self.annotations = annotations
