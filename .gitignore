@@ -1,0 +1,10 @@
+data
+.ipynb_checkpoints
+*.h5
+models
+*.swp
+*.p
+archive/*
+__pycache__
+*.json
+*.DS_Store
